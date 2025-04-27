@@ -495,37 +495,66 @@ AVITO_MESSAGE_PARAM_IN = 'param3' # Или 'message' как в ProTalk/Apimonste
 
 @app.post("/")
 async def webhook_receiver(request: Request):
-    avito_chat_id_in = "N/A"
-    avito_user_id_in = "N/A"
-    message_text_in = "" # Добавим для логирования
+    avito_chat_id_in = "N/A" # Остаются для логирования
+    avito_user_id_in = "N/A" # Остаются для логирования
+    message_text_in = ""    # Остаются для логирования
 
     try:
-        if request.headers.get('content-type') != 'application/json':
-             logger.error(f"Получен webhook с не-JSON Content-Type: {request.headers.get('content-type')}")
-             raise HTTPException(status_code=415, detail="Ожидается Content-Type: application/json")
+        # --- ИЗМЕНЕНИЕ 1: Изменить проверку Content-Type ---
+        # Вместо ожидания 'application/json', теперь ожидаем 'application/x-www-form-urlencoded'
+        if request.headers.get('content-type') != 'application/x-www-form-urlencoded':
+             logger.error(f"Получен webhook с не-FORM Content-Type: {request.headers.get('content-type')}")
+             # Возвращаем 415, но с сообщением, ожидающим form-urlencoded
+             raise HTTPException(status_code=415, detail="Ожидается Content-Type: application/x-www-form-urlencoded")
 
-        incoming_data = await request.json()
-        logger.info(f"🚀 Пришел входящий webhook. Частичные данные: {str(incoming_data)[:300]}...")
+        # --- ИЗМЕНЕНИЕ 2: Изменить способ парсинга данных запроса ---
+        # Вместо request.json(), используем request.form() для парсинга данных формы
+        incoming_data = await request.form() # <--- ИЗМЕНЕНИЕ ЗДЕСЬ!
 
-        # --- 1. Извлечение данных из входящего webhook ---
+        logger.info(f"🚀 Пришел входящий webhook (FORM). Частичные данные: {str(incoming_data)[:300]}...")
+
+        # --- 3. Извлечение данных из входящего webhook ---
         try:
-            # Получаем данные, убеждаемся, что они строки
-            avito_user_id_in = str(incoming_data.get(AVITO_USER_ID_PARAM_IN)) if incoming_data.get(AVITO_USER_ID_PARAM_IN) is not None else None
-            avito_chat_id_in = str(incoming_data.get(AVITO_CHAT_ID_PARAM_IN)) if incoming_data.get(AVITO_CHAT_ID_PARAM_IN) is not None else None
+            # --- ИЗМЕНЕНИЕ 3: Уточнить имена параметров, как они приходят в webhook формы ---
+            # Используйте имена параметров из ВХОДЯЩЕГО webhook!
+            # Исходя из вашего последнего тестового примера для отправки формы,
+            # возможно, входящие параметры называются так же:
+            AVITO_USER_ID_PARAM_IN = 'param2'
+            AVITO_CHAT_ID_PARAM_IN = 'param1'
+            AVITO_MESSAGE_PARAM_IN = 'param3' # Или 'message' как в ProTalk/Apimonster? Уточните!
+            # Если есть 4-й параметр, добавьте его здесь:
+            # AVITO_FOURTH_PARAM_IN = 'fourth_param_name_in_webhook' # Уточните имя
+            # fourth_param_in = incoming_data.get(AVITO_FOURTH_PARAM_IN)
+
+
+            # Получаем значения по новым именам параметров из объекта Form Data
+            # Starlette's FormData объект ведет себя как словарь, .get() работает
+            avito_user_id_in = incoming_data.get(AVITO_USER_ID_PARAM_IN)
+            avito_chat_id_in = incoming_data.get(AVITO_CHAT_ID_PARAM_IN)
             message_text_in = incoming_data.get(AVITO_MESSAGE_PARAM_IN)
+            # fourth_param_in = incoming_data.get(AVITO_FOURTH_PARAM_IN) # Если нужен
 
-            if not avito_chat_id_in or not avito_user_id_in or not message_text_in or not message_text_in.strip():
-                missing_params = [p for p, val in {AVITO_USER_ID_PARAM_IN: avito_user_id_in, AVITO_CHAT_ID_PARAM_IN: avito_chat_id_in, AVITO_MESSAGE_PARAM_IN: message_text_in}.items() if val is None or (isinstance(val, str) and not val.strip())]
-                logger.error(f"Входящий webhook не содержит все обязательные параметры. Отсутствуют: {', '.join(missing_params)}. Данные: {incoming_data}")
-                raise HTTPException(status_code=400, detail=f"Отсутствуют обязательные параметры в webhook: {', '.join(missing_params)}")
 
-            logger.info(f"Извлечены данные из входящего webhook: user_id={avito_user_id_in}, chat_id={avito_chat_id_in}, message_text='{message_text_in[:100]}...'")
+            # Проверка на наличие обязательных данных
+            # Проверка также на то, что строка не пустая после strip()
+            if not avito_chat_id_in or not avito_user_id_in or not message_text_in or not isinstance(message_text_in, str) or not message_text_in.strip():
+                # Определяем, каких параметров не хватает или они пустые
+                missing_params = [p for p, val in {
+                    AVITO_USER_ID_PARAM_IN: avito_user_id_in,
+                    AVITO_CHAT_ID_PARAM_IN: avito_chat_id_in,
+                    AVITO_MESSAGE_PARAM_IN: message_text_in
+                    }.items() if val is None or (isinstance(val, str) and not val.strip())]
+
+                logger.error(f"Входящий webhook (FORM) не содержит все обязательные параметры или они пустые. Отсутствуют: {', '.join(missing_params)}. Данные: {incoming_data}")
+                raise HTTPException(status_code=400, detail=f"Отсутствуют обязательные параметры в webhook (FORM): {', '.join(missing_params)}")
+
+            logger.info(f"Извлечены данные из входящего webhook (FORM): user_id={avito_user_id_in}, chat_id={avito_chat_id_in}, message_text='{message_text_in[:100]}...'")
 
         except HTTPException:
-             raise
+             raise # Пробрасываем наши HTTP ошибки
         except Exception as e:
-             logger.error(f"Ошибка при извлечении параметров из входящего webhook: {e}", exc_info=True)
-             raise HTTPException(status_code=400, detail=f"Ошибка при парсинге входящих данных: {e}")
+             logger.error(f"Ошибка при извлечении параметров из входящего webhook (FORM): {e}", exc_info=True)
+             raise HTTPException(status_code=400, detail=f"Ошибка при парсинге входящих данных формы: {e}")
 
 
         # --- 2. Вызов API нейросети Pro-Talk.ru и парсинг ответа ---
