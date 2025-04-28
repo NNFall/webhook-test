@@ -735,9 +735,9 @@ def add_note_to_lead(lead_id: int, note_text: str | None):
 # Имена 'param1', 'param2', 'param3' были в вашем ПРИМЕРЕ тестовой отправки, но в реальных логах входящего вебхука их нет.
 # В логах видно, что вы успешно извлекаете 'user_id', 'chat_id', 'message_text'.
 # Используем эти имена, как видно из вашего кода:
-AVITO_USER_ID_PARAM_IN = 'user_id'
-AVITO_CHAT_ID_PARAM_IN = 'chat_id'
-AVITO_MESSAGE_PARAM_IN = 'message_text'
+AVITO_USER_ID_PARAM_IN = 'param2'
+AVITO_CHAT_ID_PARAM_IN = 'param1'
+AVITO_MESSAGE_PARAM_IN = 'param3'
 # Если есть 4-й параметр и он нужен, укажите его имя:
 # AVITO_FOURTH_PARAM_IN = 'fourth_param_name_in_webhook'
 
