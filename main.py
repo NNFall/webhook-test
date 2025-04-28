@@ -280,80 +280,179 @@ async def send_message_to_apimonster(avito_user_id: str | None, avito_chat_id: s
 # --- Вспомогательные функции для работы с AmoCRM ---
 
 def _get_amo_headers():
+    """Возвращает стандартные заголовки для запросов к AmoCRM API, включая авторизацию."""
+    # Проверяем наличие токена перед использованием
     if not AMO_ACCESS_TOKEN or AMO_ACCESS_TOKEN == 'YOUR_AMO_ACCESS_TOKEN':
         logger.error("AMO_ACCESS_TOKEN не настроен.")
+        # Важно: если токен отсутствует, запросы не пройдут.
+        # Бросаем явное исключение, чтобы понять проблему сразу.
         raise ValueError("AMO_ACCESS_TOKEN не настроен.")
+
     return {
         "Authorization": f"Bearer {AMO_ACCESS_TOKEN}",
         "Content-Type": "application/json",
-        "Accept": "application/json"
+        "Accept": "application/json" # Явно запрашиваем JSON ответ
     }
 
 def _amo_request(method: str, endpoint: str, **kwargs):
     """
-    Выполняет запрос к AmoCRM API v4, обрабатывает базовые ошибки, таймауты,
-    и проверяет, что ответ является JSON (кроме 204 No Content).
+    Выполняет запрос к AmoCRM API v4.
+
+    Args:
+        method (str): HTTP метод (GET, POST, PATCH, DELETE, PUT).
+        endpoint (str): Конечная точка API v4 (например, '/leads', '/leads/notes').
+        **kwargs: Дополнительные аргументы для requests.request (params, json, data, files, timeout и т.д.).
+
+    Returns:
+        dict | list | None: Распарсенный JSON ответ от AmoCRM, список (для get списка),
+                            словарь (для get одной сущности), или None для 204 No Content.
+
+    Raises:
+        ValueError: Если не настроен поддомен AmoCRM, токен, или некорректный запрос (400 Bad Request),
+                    или ошибка парсинга JSON.
+        ConnectionError: При ошибках сети, таймауте, или ошибках 404 Not Found/других запросов (4xx/5xx).
+        RuntimeError: Для других неожиданных ошибок.
     """
     if not AMO_SUBDOMAIN or AMO_SUBDOMAIN == 'YOUR_AMO_SUBDOMAIN':
         logger.error("AMO_SUBDOMAIN не настроен.")
         raise ValueError("AMO_SUBDOMAIN не настроен.")
 
+    # Убеждаемся, что endpoint начинается с '/', если это не полный URL
+    if not endpoint.startswith('/') and not endpoint.startswith('http'):
+         endpoint = '/' + endpoint
+
     url = f"https://{AMO_SUBDOMAIN}.amocrm.ru/api/v4{endpoint}"
-    headers = _get_amo_headers()
+
+    # Получаем заголовки, включая авторизацию
+    try:
+        headers = _get_amo_headers()
+    except ValueError as e:
+        # Пробрасываем ошибку, если токен не настроен
+        raise e
+
+    # --- Подготовка информации для логирования запроса ---
     params_log = kwargs.get('params', {})
-    # Маскируем тело запроса в логах, т.к. может содержать чувствительные данные
-    # Выводим только ключи тела запроса
-    json_log_summary = list(kwargs.get('json', {}).keys()) if 'json' in kwargs else None
+    json_log_summary = None
+
+    # Логируем тело запроса, если оно передано в аргументе `json`
+    if 'json' in kwargs and kwargs['json'] is not None:
+        json_payload = kwargs['json']
+        # Если это список (типично для POST/PATCH одной или нескольких сущностей в v4)
+        if isinstance(json_payload, list):
+            # Логируем ключи первого элемента, если список не пустой и начинается со словаря
+            if json_payload and isinstance(json_payload[0], dict):
+                 # Показываем, что это список, и ключи первого элемента
+                 json_log_summary = f"List[0] keys: {list(json_payload[0].keys())}"
+            else:
+                 # Логируем тип списка или что он пустой
+                 json_log_summary = f"List ({len(json_payload)} items, type: {type(json_payload[0]).__name__ if json_payload else 'empty'})"
+        # Если это словарь (менее типично для тела POST/PATCH в v4, но возможно для других эндпоинтов)
+        elif isinstance(json_payload, dict):
+            json_log_summary = f"Dict keys: {list(json_payload.keys())}"
+        else:
+            # Для других типов данных в теле
+            json_log_summary = f"Payload type: {type(json_payload).__name__}"
+    # Логируем тело запроса, если оно передано в аргументе `data` (для форм или другого)
+    elif 'data' in kwargs and kwargs['data'] is not None:
+         # Data может быть строкой, словарем, байтами и т.д.
+         data_payload = kwargs['data']
+         if isinstance(data_payload, (dict, list)):
+             # Пытаемся кратко представить
+              data_log_summary = f"Data type: {type(data_payload).__name__}, keys/len: {list(data_payload.keys()) if isinstance(data_payload, dict) else len(data_payload)}"
+         else:
+              data_log_summary = f"Data type: {type(data_payload).__name__}, partial: {str(data_payload)[:100]}"
+         json_log_summary = data_log_summary # Используем ту же переменную для краткости
 
 
-    logger.debug(f"AMO Request: {method.upper()} {url}, Params: {params_log}, Body keys: {json_log_summary}")
+    logger.debug(f"AMO Request: {method.upper()} {url}")
+    logger.debug(f"  Params: {params_log}")
+    # Логируем только summary тела, если оно есть
+    if json_log_summary is not None:
+        logger.debug(f"  Body: {json_log_summary}")
+
 
     try:
-        response = requests.request(method, url, headers=headers, timeout=30, **kwargs)
-        response.raise_for_status() # Выбросит исключение для 4xx/5xx
+        # Выполняем сам HTTP запрос
+        # Добавляем таймаут по умолчанию, если он не указан в kwargs
+        request_timeout = kwargs.pop('timeout', 30)
+        response = requests.request(method, url, headers=headers, timeout=request_timeout, **kwargs)
 
+        # Выбрасываем исключение для кодов статуса 4xx/5xx.
+        # Если исключение выброшено, остальная часть блока try не выполняется.
+        response.raise_for_status()
+
+        # --- Анализ успешного ответа ---
         if response.status_code == 204:
-            logger.debug(f"AMO Response (204 No Content): {method.upper()} {url}")
-            return None
+            # 204 No Content означает успешное выполнение без тела ответа (например, при DELETE)
+            logger.debug(f"AMO Response (204 No Content): {method.upper()} {endpoint}")
+            return None # Возвращаем None, т.к. нет тела ответа
 
-        # Пытаемся распарсить JSON
+        # Если статус не 204, ожидаем тело ответа, которое должно быть JSON.
+        # Пытаемся распарсить JSON.
         try:
             response_json = response.json()
-            logger.debug(f"AMO Response ({response.status_code}): {method.upper()} {url}, Body keys: {list(response_json.keys())}")
-            return response_json
+            logger.debug(f"AMO Response ({response.status_code}): {method.upper()} {endpoint}")
+            # logger.debug(f"  Response body (partial): {str(response_json)[:200]}...") # Осторожно, может быть большим
+
+            return response_json # Возвращаем распарсенный JSON
+
         except json.JSONDecodeError:
+             # Если raise_for_status не выбросил ошибку (т.е., статус 2xx или 3xx),
+             # но ответ не JSON, это неожиданный формат ответа.
              content_type = response.headers.get('Content-Type', '').lower()
-             logger.error(f"Ошибка парсинга JSON от AmoCRM. Content-Type: {content_type}. Сырой ответ: {response.text[:200]}...")
-             # Пробрасываем исключение, если ожидался JSON, но не пришел
-             raise ValueError(f"Ошибка парсинга JSON ответа AmoCRM (Content-Type: {content_type}).")
+             logger.error(f"Ошибка парсинга JSON от AmoCRM. Получен статус {response.status_code}, Content-Type: {content_type}. Сырой ответ: {response.text[:200]}...")
+             # Пробрасываем исключение, так как ожидался JSON, но не пришел
+             raise ValueError(f"Ошибка парсинга JSON ответа AmoCRM (статус: {response.status_code}, Content-Type: {content_type}).")
 
 
-    except requests.exceptions.Timeout:
-         logger.error(f"Таймаут при запросе к AmoCRM ({method.upper()} {url}).")
-         raise ConnectionError(f"Таймаут при обращении к AmoCRM ({method.upper()} {url}).") from None
+    # --- Обработка исключений ---
+    except requests.exceptions.Timeout as e:
+         # Специально обрабатываем таймаут
+         logger.error(f"Таймаут при запросе к AmoCRM ({method.upper()} {endpoint}): {e}")
+         # Перебрасываем как ConnectionError для единообразия обработки сетевых проблем
+         raise ConnectionError(f"Таймаут при обращении к AmoCRM ({method.upper()} {endpoint}).") from e
     except requests.exceptions.RequestException as e:
-        logger.error(f"Ошибка запроса к AmoCRM ({method.upper()} {url}): {e}")
+        # Обработка других ошибок библиотеки requests (сетевые ошибки, ошибки статуса 4xx/5xx)
+        logger.error(f"Ошибка запроса к AmoCRM ({method.upper()} {endpoint}): {e}")
         if e.response is not None:
-             logger.error(f"Ответ AmoCRM при ошибке ({e.response.status_code}): {e.response.text}")
+             logger.error(f"  Ответ AmoCRM при ошибке ({e.response.status_code}): {e.response.text[:200]}...") # Логируем часть ответа при ошибке
+
+             # Для специфических HTTP ошибок добавляем более информативные сообщения в исключение
              if e.response.status_code == 404:
-                 # Добавляем маркер в сообщение об ошибке для легкой проверки
-                 raise ConnectionError(f"AmoCRM Not Found (404) {method.upper()} {url}") from e
+                 # 404 Not Found
+                 raise ConnectionError(f"AmoCRM Not Found (404) {method.upper()} {endpoint}") from e
              if e.response.status_code == 400:
-                  # Включаем детали ошибки из тела ответа, если они есть и это JSON
-                  error_detail = "Нет деталей в ответе"
+                  # 400 Bad Request - пытаемся извлечь детали ошибки из JSON тела ответа
+                  error_detail = "Нет деталей ошибки в ответе (не JSON или пустое)"
                   try:
                        error_json = e.response.json()
+                       # Пытаемся получить поле 'detail' или весь JSON как строку
                        error_detail = error_json.get('detail', str(error_json))
                   except json.JSONDecodeError:
-                       error_detail = e.response.text[:200] # Часть сырого текста при ошибке парсинга
-                  logger.error(f"AmoCRM Bad Request (400): {error_detail}")
-                  # Пробрасываем как ValueError, чтобы было понятно, что это проблема данных/запроса
+                       # Если тело ошибки не JSON
+                       error_detail = e.response.text[:200] # Логируем часть сырого текста ошибки
+                  logger.error(f"AmoCRM Bad Request (400) Details: {error_detail}")
+                  # Пробрасываем как ValueError, чтобы было понятно, что это проблема данных/запроса,
+                  # а не сетевая ошибка или "не найдено".
                   raise ValueError(f"Некорректный запрос к AmoCRM (400): {error_detail}") from e
-        # Пробрасываем другие requests.exceptions как ConnectionError
-        raise ConnectionError(f"Ошибка при обращении к AmoCRM ({method.upper()} {url}): {e}") from e
+
+        # Для всех остальных ошибок requests.exceptions (сетевые, другие 4xx/5xx кроме 400/404)
+        # Перебрасываем как ConnectionError
+        raise ConnectionError(f"Ошибка при обращении к AmoCRM ({method.upper()} {endpoint}): {e}") from e
+    except (ValueError, RuntimeError) as e:
+        # Обработка ошибок, которые мы сами пробросили (например, ошибка парсинга JSON ответа, ошибка получения токена)
+        # Эти ошибки уже достаточно информативно залогированы внутри тех блоков, где они возникли.
+        # Просто пробрасываем их дальше.
+        raise e
     except Exception as e:
-        logger.error(f"Неожиданная ошибка при работе с AmoCRM: {e}", exc_info=True)
+        # Обработка любых других неожиданных исключений
+        logger.critical(f"Неожиданная КРИТИЧЕСКАЯ ошибка при работе с AmoCRM ({method.upper()} {endpoint}): {e}", exc_info=True)
+        # Пробрасываем как RuntimeError
         raise RuntimeError(f"Неожиданная ошибка AmoCRM: {e}") from e
+
+# Примечание: Для использования этой функции вам нужно убедиться,
+# что константы AMO_ACCESS_TOKEN и AMO_SUBDOMAIN доступны в области видимости,
+# где определена эта функция. Обычно они определяются в начале файла main.py.
 
 
 def find_lead_by_avito_id(avito_id: str | None):
